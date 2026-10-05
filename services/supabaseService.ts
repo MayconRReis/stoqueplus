@@ -804,7 +804,7 @@ export const supabaseService = {
             ).map(p => p.id);
 
             if (palletsInTargetSlots.length > 0) {
-              orClause += `,id.in.(${palletsInTargetSlots.slice(0, 30).join(',')})`;
+              orClause += `,id.in.(${palletsInTargetSlots.join(',')})`;
             }
           }
         } catch (e) {
@@ -825,15 +825,19 @@ export const supabaseService = {
             if (filters.typeFilter === 'SEM_SELO') {
               return insp.withoutSeal;
             }
+            if (filters.typeFilter === 'DATADOS') {
+              return insp.datedBottles;
+            }
             if (isContainerSearch) {
               return [SlotContent.CONTAINER_SJ, SlotContent.CONTAINER_LP, SlotContent.CONTAINER_CP].includes(insp.contentType);
             }
             return insp.contentType === filters.typeFilter;
           })
         ).map(i => i.id);
-        
+
         if (matchingIds.length > 0) {
-          query = query.in('id', matchingIds.slice(0, 150));
+          // Sem corte de IDs: antes limitava a 150 e exportava incompleto.
+          query = query.in('id', matchingIds);
         } else {
           query = query.eq('id', 'none_found_export_' + Date.now());
         }

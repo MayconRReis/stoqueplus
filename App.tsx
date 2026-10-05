@@ -883,6 +883,10 @@ const App: React.FC = () => {
   const BACKUP_STORAGE_KEY = 'stoque_last_backup_date';
 
   const handleDownloadFullBackup = async () => {
+    if (user?.role !== 'admin') {
+      showNotification('Apenas administradores podem baixar backup.', 'error');
+      return;
+    }
     try {
       setIsBackupDownloading(true);
       showNotification('Gerando backup completo...', 'info');
@@ -942,10 +946,9 @@ const App: React.FC = () => {
   };
 
   // Verifica uma vez por sessão (a partir das 08:00) se o backup de hoje já foi feito.
-  // Se não foi, mostra o modal de lembrete. Fechar sem baixar não baixa de novo nesta
-  // sessão, mas volta a aparecer no próximo login/carregamento do app.
+  // Se não foi, mostra o modal de lembrete apenas para administradores.
   useEffect(() => {
-    if (!user || isPublicView) return;
+    if (!user || user.role !== 'admin' || isPublicView) return;
     if (backupModalCheckedRef.current) return;
 
     const checkBackupReminder = () => {
@@ -990,7 +993,7 @@ const App: React.FC = () => {
     }
 
     const parts = Object.entries(result.summary)
-      .filter(([, count]) => count > 0)
+      .filter(([, count]) => Number(count) > 0)
       .map(([key, count]) => `${count} ${RESTORE_LABELS[key] || key}`);
 
     if (Object.keys(result.failed || {}).length > 0) {
@@ -3912,12 +3915,14 @@ const App: React.FC = () => {
         onConfirm={confirmRecovery}
         isLoading={isRecovering}
       />
-      <BackupReminderModal
-        isOpen={isBackupModalOpen}
-        onClose={() => setIsBackupModalOpen(false)}
-        onDownload={handleDownloadFullBackup}
-        isLoading={isBackupDownloading}
-      />
+      {user?.role === 'admin' && (
+        <BackupReminderModal
+          isOpen={isBackupModalOpen}
+          onClose={() => setIsBackupModalOpen(false)}
+          onDownload={handleDownloadFullBackup}
+          isLoading={isBackupDownloading}
+        />
+      )}
       {user?.role === 'admin' && (
         <RestoreBackupModal
           isOpen={isRestoreBackupModalOpen}
