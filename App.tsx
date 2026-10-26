@@ -1,7 +1,7 @@
 
 import React, { useState, useEffect, useMemo, useCallback, memo, useRef } from 'react';
 import Papa from 'papaparse';
-import { disableSupabase, isFetchOrNetworkError } from './lib/supabase';
+import { supabase, disableSupabase, isFetchOrNetworkError } from './lib/supabase';
 import { useNotifications } from './hooks/useNotifications';
 import { useTheme } from './hooks/useTheme';
 import { useAuth } from './hooks/useAuth';
@@ -883,36 +883,105 @@ const App: React.FC = () => {
   const BACKUP_STORAGE_KEY = 'stoque_last_backup_date';
 
   const handleDownloadFullBackup = async () => {
-    if (user?.role !== 'admin') {
-      showNotification('Apenas administradores podem baixar backup.', 'error');
-      return;
-    }
     try {
       setIsBackupDownloading(true);
       showNotification('Gerando backup completo...', 'info');
 
-      const [fullInventory, fullHistory, fullShipments, fullSlots, rotativeStock, profiles, editRequests] = await Promise.all([
-        supabaseService.getAllInventoryForExport({ includeGrouped: true }),
-        supabaseService.getHistory(),
-        supabaseService.getShipments(),
-        supabaseService.getSlots(),
-        supabaseService.getRotativeStock().catch(() => []),
-        supabaseService.getProfiles().catch(() => []),
-        supabaseService.getEditRequests().catch(() => []),
+      // Lê UMA tabela inteira, sem filtro, paginando de 1000 em 1000 (limite do Supabase).
+      // Ordena por id para a paginação ser estável (sem pular nem repetir linhas).
+      // Se qualquer página falhar, lança erro: o backup NÃO é gerado pela metade.
+      const PAGE_SIZE = 1000;
+      const readAllRows = async (table: string): Promise<any[]> => {
+        const rows: any[] = [];
+        for (let from = 0; ; from += PAGE_SIZE) {
+          const { data, error } = await supabase
+            .from(table)
+            .select('*')
+            .order('id', { ascending: true })
+            .range(from, from + PAGE_SIZE - 1);
+          if (error) {
+            console.error(`Backup: falha ao ler ${table}`, error);
+            throw new Error(`BACKUP_READ:${table}`);
+          }
+          const page = data || [];
+          rows.push(...page);
+          if (page.length < PAGE_SIZE) break;
+        }
+        return rows;
+      };
+
+      const [invRows, histRows, shipRows, slotRows, profileRows, editRows] = await Promise.all([
+        readAllRows('inventory'),
+        readAllRows('history'),
+        readAllRows('shipments'),
+        readAllRows('warehouse_slots'),
+        readAllRows('profiles'),
+        readAllRows('inventory_edit_requests'),
       ]);
 
       const backupPayload = {
         geradoEm: new Date().toISOString(),
         origem: 'Stoque+',
-        versao: 1,
+        versao: 2,
         dados: {
-          inventario: fullInventory,
-          historico: fullHistory,
-          carregamentos: fullShipments,
-          vagas: fullSlots,
-          estoqueRotativo: rotativeStock,
-          usuarios: profiles,
-          solicitacoesEdicao: editRequests,
+          inventario: invRows.map((r) => ({
+            id: r.id,
+            loadingId: r.loading_id,
+            originOP: r.origin_op,
+            description: r.description,
+            lot: r.lot,
+            pallets: r.pallets,
+            date: r.date,
+            status: r.status,
+            inspections: r.inspections,
+            operatorName: r.operator_name,
+            is_group: r.is_group,
+            parent_group_id: r.parent_group_id,
+            createdAt: r.created_at,
+          })),
+          historico: histRows.map((r) => ({
+            id: r.id,
+            type: r.type,
+            timestamp: r.timestamp,
+            loadingId: r.loading_id,
+            description: r.description,
+            op: r.op,
+            lot: r.lot,
+            palletNumber: r.pallet_number,
+            totalPallets: r.total_pallets,
+            slot: r.slot,
+            details: r.details,
+            operatorName: r.operator_name,
+            createdAt: r.created_at,
+          })),
+          carregamentos: shipRows.map((r) => ({
+            id: r.id,
+            type: r.type,
+            status: r.status,
+            createdAt: r.created_at,
+            scheduledDate: r.scheduled_date,
+            operatorName: r.operator_name,
+            closedAt: r.closed_at,
+            obs: r.obs,
+          })),
+          vagas: slotRows.map((r) => ({
+            id: r.id,
+            rack: r.rack,
+            level: r.level,
+            position: r.position,
+            status: r.status,
+            occupiedBy: r.occupied_by,
+            updatedAt: r.updated_at,
+          })),
+          usuarios: profileRows.map((r) => ({
+            id: r.id,
+            name: r.name,
+            role: r.role,
+            active: r.active,
+            createdAt: r.created_at,
+          })),
+          // Colunas originais do banco, sem renomear
+          solicitacoesEdicao: editRows,
         },
       };
 
@@ -935,20 +1004,33 @@ const App: React.FC = () => {
         // localStorage indisponível — o lembrete pode reaparecer nesta sessão, sem problema
       }
 
+      const fmt = (n: number) => n.toLocaleString('pt-BR');
       setIsBackupModalOpen(false);
-      showNotification('Backup baixado com sucesso!');
+      showNotification(
+        `Backup baixado com sucesso! Backup: ${fmt(invRows.length)} pallets, ${fmt(histRows.length)} histórico, ${fmt(shipRows.length)} carregamentos, ${fmt(slotRows.length)} vagas, ${fmt(profileRows.length)} usuários, ${fmt(editRows.length)} solicitações`
+      );
     } catch (error) {
       console.error('Backup error:', error);
-      showNotification('Erro ao gerar o backup.', 'error');
+      const failedTable =
+        error instanceof Error && error.message.startsWith('BACKUP_READ:')
+          ? error.message.replace('BACKUP_READ:', '')
+          : '';
+      showNotification(
+        failedTable
+          ? `Backup não gerado: falha ao ler ${failedTable}. Tente de novo.`
+          : 'Backup não gerado: falha ao ler o banco. Tente de novo.',
+        'error'
+      );
     } finally {
       setIsBackupDownloading(false);
     }
   };
 
   // Verifica uma vez por sessão (a partir das 08:00) se o backup de hoje já foi feito.
-  // Se não foi, mostra o modal de lembrete apenas para administradores.
+  // Se não foi, mostra o modal de lembrete. Fechar sem baixar não baixa de novo nesta
+  // sessão, mas volta a aparecer no próximo login/carregamento do app.
   useEffect(() => {
-    if (!user || user.role !== 'admin' || isPublicView) return;
+    if (!user || isPublicView) return;
     if (backupModalCheckedRef.current) return;
 
     const checkBackupReminder = () => {
@@ -993,7 +1075,7 @@ const App: React.FC = () => {
     }
 
     const parts = Object.entries(result.summary)
-      .filter(([, count]) => Number(count) > 0)
+      .filter(([, count]) => count > 0)
       .map(([key, count]) => `${count} ${RESTORE_LABELS[key] || key}`);
 
     if (Object.keys(result.failed || {}).length > 0) {
@@ -3915,14 +3997,12 @@ const App: React.FC = () => {
         onConfirm={confirmRecovery}
         isLoading={isRecovering}
       />
-      {user?.role === 'admin' && (
-        <BackupReminderModal
-          isOpen={isBackupModalOpen}
-          onClose={() => setIsBackupModalOpen(false)}
-          onDownload={handleDownloadFullBackup}
-          isLoading={isBackupDownloading}
-        />
-      )}
+      <BackupReminderModal
+        isOpen={isBackupModalOpen}
+        onClose={() => setIsBackupModalOpen(false)}
+        onDownload={handleDownloadFullBackup}
+        isLoading={isBackupDownloading}
+      />
       {user?.role === 'admin' && (
         <RestoreBackupModal
           isOpen={isRestoreBackupModalOpen}
